@@ -24,12 +24,23 @@
     { id: 'done', label: 'Listo', tone: 'green' }
   ];
 
+  var DATE_PRESETS = [
+    { id: 'all', label: 'Cualquier fecha' },
+    { id: 'overdue', label: 'Pasadas sin terminar' },
+    { id: 'week', label: 'Esta semana' },
+    { id: 'month', label: 'Este mes' },
+    { id: 'next30', label: 'Próximos 30 días' },
+    { id: 'none', label: 'Sin fecha' },
+    { id: 'custom', label: 'Rango personalizado…' }
+  ];
+
   var SORTS = [
     { id: 'manual', label: 'Orden manual' },
     { id: 'name', label: 'Nombre (A–Z)' },
     { id: 'client', label: 'Cliente (A–Z)' },
-    { id: 'budget', label: 'Presupuesto (mayor)' },
+    { id: 'budget', label: 'Valor del proyecto (mayor)' },
     { id: 'margin', label: 'Margen Fuse (mayor)' },
+    { id: 'due', label: 'Fecha del proyecto (más próxima)' },
     { id: 'updated', label: 'Última actualización' }
   ];
 
@@ -63,6 +74,77 @@
   }
 
   function pct(n) { return n == null ? '' : numFmt.format(n) + '%'; }
+
+  /* Fechas: se guardan como 'AAAA-MM-DD' (hora local) */
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function toISO(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function fromISO(iso) { var p = String(iso).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  function todayISO() { return toISO(new Date()); }
+  function addDays(iso, n) { var d = fromISO(iso); d.setDate(d.getDate() + n); return toISO(d); }
+  function validISO(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(fromISO(s)); }
+  function daysUntil(iso) { return Math.round((fromISO(iso) - fromISO(todayISO())) / 864e5); }
+
+  var dayFmt = new Intl.DateTimeFormat('es-CO', { day: 'numeric', month: 'short' });
+  var dayYearFmt = new Intl.DateTimeFormat('es-CO', { day: 'numeric', month: 'short', year: 'numeric' });
+  function fmtDay(iso) {
+    if (!iso) return '';
+    var d = fromISO(iso);
+    return (d.getFullYear() === new Date().getFullYear() ? dayFmt : dayYearFmt).format(d).replace('.', '');
+  }
+
+  /* Estado relativo de una fecha: vencida, hoy, pronto */
+  function dueState(iso, done) {
+    if (!iso) return { cls: 'is-empty', text: 'Sin fecha' };
+    var n = daysUntil(iso);
+    if (done) return { cls: '', text: fmtDay(iso) };
+    if (n < 0) return { cls: 'is-overdue', text: 'Hace ' + (-n) + (n === -1 ? ' día' : ' días') };
+    if (n === 0) return { cls: 'is-today', text: 'Hoy' };
+    if (n === 1) return { cls: 'is-soon', text: 'Mañana' };
+    if (n <= 7) return { cls: 'is-soon', text: 'En ' + n + ' días' };
+    return { cls: '', text: 'En ' + n + ' días' };
+  }
+
+  function dateRange() {
+    var f = ui.dateFilter, t = todayISO(), d = new Date();
+    switch (f.preset) {
+      case 'overdue': return { to: addDays(t, -1), pendingOnly: true };
+      case 'week': { var dow = (d.getDay() + 6) % 7; var mon = addDays(t, -dow); return { from: mon, to: addDays(mon, 6) }; }
+      case 'month': return { from: toISO(new Date(d.getFullYear(), d.getMonth(), 1)), to: toISO(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
+      case 'next30': return { from: t, to: addDays(t, 30) };
+      case 'none': return { none: true };
+      case 'custom': return { from: validISO(f.from) ? f.from : null, to: validISO(f.to) ? f.to : null };
+      default: return null;
+    }
+  }
+
+  function dateMatches(iso, done, r) {
+    if (!r) return true;
+    if (r.none) return !iso;
+    if (!iso) return false;
+    if (r.pendingOnly && done) return false;
+    if (r.from && iso < r.from) return false;
+    if (r.to && iso > r.to) return false;
+    return true;
+  }
+
+  /* Un proyecto entra al filtro si su fecha o la de alguna de sus tareas está en el rango */
+  function projectDateMatch(p, r) {
+    if (!r) return true;
+    if (r.none) return !p.dueDate;
+    if (dateMatches(p.dueDate, p.status === 'done', r)) return true;
+    return p.tasks.some(function (t) { return dateMatches(t.dueDate, t.status === 'done', r); });
+  }
+
+  function dateFilterActive() { return ui.dateFilter.preset !== 'all' && !!dateRange(); }
+
+  function dateFilterLabel() {
+    var f = ui.dateFilter;
+    if (f.preset !== 'custom') return statusById(DATE_PRESETS, f.preset).label;
+    if (f.from && f.to) return fmtDay(f.from) + ' – ' + fmtDay(f.to);
+    if (f.from) return 'Desde ' + fmtDay(f.from);
+    if (f.to) return 'Hasta ' + fmtDay(f.to);
+    return 'Rango personalizado';
+  }
 
   /* Acepta "190000000", "190.000.000", "$190.000.000", "190 millones", "190M", "1,5 mil millones", "500 mil". */
   function parseMoney(raw) {
@@ -136,7 +218,8 @@
     sort: '<path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"/>',
     layers: '<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>',
     check: '<path d="m5 12 5 5 9-10"/>',
-    arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>'
+    arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'
   };
 
   function icon(name, cls) {
@@ -158,23 +241,24 @@
       marginPct: fields.marginPct == null ? null : fields.marginPct,
       nextStep: fields.nextStep || '',
       notes: fields.notes || '',
-      tasks: (fields.tasks || []).map(function (t) { return makeTask(t.title, t.status); }),
+      dueDate: fields.dueDate || null,
+      tasks: (fields.tasks || []).map(function (t) { return makeTask(t.title, t.status, t.dueDate); }),
       order: fields.order || 0,
       createdAt: now,
       updatedAt: now
     };
   }
 
-  function makeTask(title, status) {
-    return { id: uid(), title: title || '', status: status || 'pending', createdAt: Date.now() };
+  function makeTask(title, status, dueDate) {
+    return { id: uid(), title: title || '', status: status || 'pending', dueDate: dueDate || null, createdAt: Date.now() };
   }
 
   function seed() {
     var list = [
       makeProject({
-        name: 'Caravanas', client: 'Friko', status: 'running',
+        name: 'Caravanas', client: 'Friko', status: 'running', dueDate: '2026-12-05',
         nextStep: 'Ejecutar la última caravana, programada para el 5 de diciembre.',
-        tasks: [{ title: 'Ejecutar la última caravana (5 de diciembre)', status: 'progress' }]
+        tasks: [{ title: 'Ejecutar la última caravana (5 de diciembre)', status: 'progress', dueDate: '2026-12-05' }]
       }),
       makeProject({
         name: 'Navidas', client: 'Friko', status: 'proposal', budget: 190000000,
@@ -194,7 +278,18 @@
       })
     ];
     list.forEach(function (p, i) { p.order = i; });
-    return { version: 1, projects: list };
+    return { version: 2, projects: list };
+  }
+
+  /* Datos guardados con versiones anteriores: agrega campos nuevos sin perder nada */
+  function migrate(s) {
+    s.projects.forEach(function (p) {
+      if (!validISO(p.dueDate)) p.dueDate = null;
+      p.tasks.forEach(function (t) { if (!validISO(t.dueDate)) t.dueDate = null; });
+      if ((s.version || 1) < 2 && p.name === 'Caravanas' && !p.dueDate) p.dueDate = '2026-12-05';
+    });
+    s.version = 2;
+    return s;
   }
 
   function validState(s) {
@@ -208,7 +303,7 @@
       var raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         var s = JSON.parse(raw);
-        if (validState(s)) return s;
+        if (validState(s)) return migrate(s);
       }
     } catch (e) { /* almacenamiento no disponible */ }
     return seed();
@@ -226,7 +321,7 @@
   }
 
   function loadUi() {
-    var d = { view: 'board', sort: 'manual', grouped: true, collapsed: {}, statusFilter: 'all' };
+    var d = { view: 'board', sort: 'manual', grouped: true, collapsed: {}, statusFilter: 'all', dateFilter: { preset: 'all', from: '', to: '' } };
     try {
       var raw = localStorage.getItem(UI_KEY);
       if (raw) {
@@ -240,13 +335,14 @@
   function saveUi() {
     try {
       localStorage.setItem(UI_KEY, JSON.stringify({
-        view: ui.view, sort: ui.sort, grouped: ui.grouped, collapsed: ui.collapsed, statusFilter: ui.statusFilter
+        view: ui.view, sort: ui.sort, grouped: ui.grouped, collapsed: ui.collapsed, statusFilter: ui.statusFilter, dateFilter: ui.dateFilter
       }));
     } catch (e) {}
   }
 
   var state = load();
   var ui = loadUi();
+  if (!ui.dateFilter || !statusById(DATE_PRESETS, ui.dateFilter.preset) || statusById(DATE_PRESETS, ui.dateFilter.preset).id !== ui.dateFilter.preset) ui.dateFilter = { preset: 'all', from: '', to: '' };
   ui.query = '';
   ui.selectedId = null;
   ui.taskFilter = 'all';
@@ -267,8 +363,10 @@
 
   function visibleProjects() {
     var q = normalize(ui.query);
+    var r = dateRange();
     var list = state.projects.filter(function (p) {
       if (ui.statusFilter !== 'all' && p.status !== ui.statusFilter) return false;
+      if (!projectDateMatch(p, r)) return false;
       if (!q) return true;
       return normalize(p.name + ' ' + p.client + ' ' + p.nextStep).indexOf(q) !== -1;
     });
@@ -278,7 +376,8 @@
       client: function (a, b) { return a.client.localeCompare(b.client, 'es') || a.name.localeCompare(b.name, 'es'); },
       budget: function (a, b) { return (b.budget == null ? -1 : b.budget) - (a.budget == null ? -1 : a.budget); },
       margin: function (a, b) { var ma = marginOf(a), mb = marginOf(b); return (mb == null ? -1 : mb) - (ma == null ? -1 : ma); },
-      updated: function (a, b) { return b.updatedAt - a.updatedAt; }
+      updated: function (a, b) { return b.updatedAt - a.updatedAt; },
+      due: function (a, b) { return (a.dueDate || '9999') < (b.dueDate || '9999') ? -1 : (a.dueDate || '9999') > (b.dueDate || '9999') ? 1 : a.order - b.order; }
     }[ui.sort] || function (a, b) { return a.order - b.order; };
     return list.slice().sort(cmp);
   }
@@ -329,7 +428,7 @@
         '</nav>' +
         '<button type="button" class="btn btn-primary btn-block" data-action="new-project">' + icon('plus') + 'Nuevo proyecto <kbd class="kbd">N</kbd></button>' +
         (t.count ? '<div class="side-pulse">' +
-          '<div class="side-pulse-row"><span class="side-pulse-label">Presupuesto</span><span class="side-pulse-value">' + (t.budgetKnown ? esc(moneyShort(t.budget)) : '—') + '</span></div>' +
+          '<div class="side-pulse-row"><span class="side-pulse-label">Valor proyectos</span><span class="side-pulse-value">' + (t.budgetKnown ? esc(moneyShort(t.budget)) : '—') + '</span></div>' +
           '<div class="side-pulse-row"><span class="side-pulse-label">Margen Fuse</span><span class="side-pulse-value">' + (t.marginKnown ? esc(moneyShort(t.margin)) : '—') + '</span></div>' +
           statusDist(state.projects) +
         '</div>' : '') +
@@ -389,6 +488,7 @@
           chip('all', 'Todos') + PROJECT_STATUSES.map(function (s) { return chip(s.id, s.label, s.tone); }).join('') +
         '</div>' +
         '<div class="toolbar-right">' +
+          dateControl() +
           '<label class="select">' + icon('sort') +
             '<select data-field="sort" aria-label="Ordenar">' + SORTS.map(function (s) {
               return '<option value="' + s.id + '"' + (ui.sort === s.id ? ' selected' : '') + '>' + s.label + '</option>';
@@ -401,12 +501,12 @@
     if (!state.projects.length) {
       return head + '<div class="empty">' +
         '<h2>Tu tablero está vacío</h2>' +
-        '<p>Crea un proyecto, asígnale un cliente y un presupuesto, y Planner calculará el margen Fuse por ti.</p>' +
+        '<p>Crea un proyecto, asígnale un cliente y un valor, y Planner calculará el margen Fuse por ti.</p>' +
         '<button type="button" class="btn btn-primary" data-action="new-project">' + icon('plus') + 'Crear el primer proyecto</button>' +
       '</div>';
     }
     if (!list.length) {
-      return head + '<div class="empty"><h2>Sin resultados</h2><p>Ningún proyecto coincide con la búsqueda o el filtro.</p>' +
+      return head + '<div class="empty"><h2>Sin resultados</h2><p>Ningún proyecto coincide con la búsqueda o los filtros' + (dateFilterActive() ? ' (fecha: ' + esc(dateFilterLabel().toLowerCase()) + ')' : '') + '.</p>' +
         '<button type="button" class="btn" data-action="clear-filters">Limpiar filtros</button></div>';
     }
 
@@ -414,7 +514,7 @@
     if (ui.grouped) {
       body = PROJECT_STATUSES.map(function (s) {
         var items = list.filter(function (p) { return p.status === s.id; });
-        if (!items.length && (ui.query || ui.statusFilter !== 'all')) return '';
+        if (!items.length && (ui.query || ui.statusFilter !== 'all' || dateFilterActive())) return '';
         return group(s, items);
       }).join('');
     } else {
@@ -423,10 +523,40 @@
     return head + '<div class="board-scroll"><div class="board">' + colHeader() + body + '</div></div>';
   }
 
+  function dateControl() {
+    var f = ui.dateFilter;
+    return '<div class="date-filter' + (dateFilterActive() ? ' is-on' : '') + '">' +
+      '<label class="select">' + icon('calendar') +
+        '<select data-field="datePreset" aria-label="Filtrar por fecha">' + DATE_PRESETS.map(function (d) {
+          return '<option value="' + d.id + '"' + (f.preset === d.id ? ' selected' : '') + '>' + d.label + '</option>';
+        }).join('') + '</select>' +
+      '</label>' +
+      (f.preset === 'custom' ?
+        '<label class="date-range"><span>Desde</span><input type="date" data-key="date-from" data-field="dateFrom" value="' + esc(f.from) + '" aria-label="Desde"></label>' +
+        '<label class="date-range"><span>Hasta</span><input type="date" data-key="date-to" data-field="dateTo" value="' + esc(f.to) + '" aria-label="Hasta"></label>' : '') +
+      (f.preset !== 'all' ? '<button type="button" class="btn btn-ghost btn-icon btn-xs" data-action="clear-date" aria-label="Quitar filtro de fecha">' + icon('x') + '</button>' : '') +
+    '</div>';
+  }
+
+  /* Fecha legible ("5 dic") que abre el calendario nativo; el input real queda oculto debajo */
+  function datePick(iso, done, attrs, label, key) {
+    var st = dueState(iso, done);
+    return '<span class="date-pick ' + st.cls + '">' +
+      '<button type="button" class="date-btn" data-action="pick-date" data-key="' + key + '" aria-label="' + esc(label) + ': ' + esc(iso ? fmtDay(iso) : 'sin fecha') + '. Cambiar" title="' + esc(iso ? fmtDay(iso) + ' · ' + st.text : 'Asignar fecha') + '">' +
+        icon('calendar') + '<span class="date-text">' + (iso ? esc(fmtDay(iso)) : 'Sin fecha') + '</span></button>' +
+      '<input type="date" class="date-native" tabindex="-1" aria-hidden="true" ' + attrs + ' value="' + esc(iso || '') + '">' +
+      (iso ? '<button type="button" class="date-clear" data-action="clear-field-date" aria-label="Quitar ' + esc(label.toLowerCase()) + '">' + icon('x') + '</button>' : '') +
+    '</span>';
+  }
+
+  function dueInput(p, key) {
+    return datePick(p.dueDate, p.status === 'done', 'data-field="dueDate" data-id="' + p.id + '"', 'Fecha del proyecto', key);
+  }
+
   function boardSub(list) {
     var t = totals(list);
     var parts = [list.length + ' ' + (list.length === 1 ? 'proyecto' : 'proyectos') + (list.length !== state.projects.length ? ' de ' + state.projects.length : '')];
-    if (t.budgetKnown) parts.push('<span class="strong">' + money(t.budget) + '</span> en presupuesto');
+    if (t.budgetKnown) parts.push('<span class="strong">' + money(t.budget) + '</span> en valor de proyectos');
     if (t.marginKnown) parts.push('<span class="strong">' + money(t.margin) + '</span> de margen Fuse');
     if (!t.budgetKnown) parts.push('Haz clic en cualquier celda para editarla');
     return parts.join(' · ');
@@ -440,7 +570,7 @@
 
   function colHeader() {
     return '<div class="row row-head" role="row">' +
-      '<span></span><span>Proyecto</span><span>Cliente</span><span>Estado</span><span class="num">Presupuesto</span>' +
+      '<span></span><span>Proyecto</span><span>Cliente</span><span>Estado</span><span>Fecha</span><span class="num">Valor del proyecto</span>' +
       '<span class="num">% Margen</span><span class="num">Margen Fuse</span><span>Tareas</span><span>Próximo paso</span><span></span></div>';
   }
 
@@ -462,7 +592,7 @@
         items.map(row).join('') +
         '<div class="row row-add"><span></span><button type="button" class="add-inline" data-action="new-project" data-status="' + (s ? s.id : '') + '">' + icon('plus') + 'Agregar proyecto</button></div>' +
         (items.length ? '<div class="row row-sum" aria-label="Totales del grupo">' +
-          '<span></span><span class="muted small">Total</span><span></span><span></span>' +
+          '<span></span><span class="muted small">Total</span><span></span><span></span><span></span>' +
           '<span class="num strong">' + (t.budgetKnown ? money(t.budget) : '<span class="muted">—</span>') + '</span>' +
           '<span class="num muted small">' + (t.budgetKnown && t.marginKnown ? pct(Math.round(t.margin / t.budget * 1000) / 10) : '') + '</span>' +
           '<span class="num strong">' + (t.marginKnown ? money(t.margin) : '<span class="muted">—</span>') + '</span>' +
@@ -482,7 +612,8 @@
         '<button type="button" class="open-btn" data-action="open-project" data-id="' + p.id + '" aria-label="Abrir ' + esc(p.name || 'proyecto') + '">' + icon('open') + '<span>Abrir</span></button></span>' +
       '<span class="c-client" data-label="Cliente"><input class="cell-input" data-key="client-' + p.id + '" data-field="client" data-id="' + p.id + '" value="' + esc(p.client) + '" placeholder="Cliente" aria-label="Cliente" list="client-list"></span>' +
       '<span class="cell-status c-status">' + statusPill('project', p.status, 'data-id="' + p.id + '"') + '</span>' +
-      '<span class="num c-budget" data-label="Presupuesto"><input class="cell-input num" data-key="budget-' + p.id + '" data-field="budget" data-id="' + p.id + '" value="' + esc(money(p.budget)) + '" placeholder="Por definir" aria-label="Presupuesto" inputmode="decimal"></span>' +
+      '<span class="c-due" data-label="Fecha">' + dueInput(p, 'due-' + p.id) + '</span>' +
+      '<span class="num c-budget" data-label="Valor del proyecto"><input class="cell-input num" data-key="budget-' + p.id + '" data-field="budget" data-id="' + p.id + '" value="' + esc(money(p.budget)) + '" placeholder="Por definir" aria-label="Valor del proyecto" inputmode="decimal"></span>' +
       '<span class="num c-pct" data-label="% Margen"><input class="cell-input num" data-key="pct-' + p.id + '" data-field="marginPct" data-id="' + p.id + '" value="' + esc(pct(p.marginPct)) + '" placeholder="—" aria-label="Porcentaje de margen" inputmode="decimal"></span>' +
       '<span class="num cell-margin c-margin" data-label="Margen Fuse">' + (m == null ? '<span class="muted">Por definir</span>' : '<span class="strong">' + money(m) + '</span>') + '</span>' +
       '<span class="c-tasks" data-label="Tareas">' + taskBar(p) + '</span>' +
@@ -494,23 +625,29 @@
   /* ---------- Resumen general ---------- */
 
   function overviewView() {
-    var all = state.projects;
+    var dr = dateRange();
+    var all = state.projects.filter(function (p) { return projectDateMatch(p, dr); });
     var t = totals(all);
     var active = all.filter(function (p) { return p.status === 'running' || p.status === 'proposal'; }).length;
     var avgPct = t.budget && t.marginKnown ? Math.round(t.margin / sumBudgetWithMargin(all) * 1000) / 10 : null;
     var pending = all.length - t.budgetKnown;
 
-    var head = '<header class="page-head"><div><h1>Resumen general</h1><p class="sub cap">' + esc(longDateFmt.format(new Date())) + '</p></div></header>';
+    var head = '<header class="page-head"><div><h1>Resumen general</h1><p class="sub cap">' + esc(longDateFmt.format(new Date())) +
+      (dateFilterActive() ? ' · Filtrado por fecha: ' + esc(dateFilterLabel().toLowerCase()) : '') + '</p></div>' + dateControl() + '</header>';
 
+    if (state.projects.length && !all.length) {
+      return head + '<div class="empty"><h2>Sin proyectos en estas fechas</h2><p>Ningún proyecto ni tarea tiene fecha dentro de «' + esc(dateFilterLabel()) + '».</p>' +
+        '<button type="button" class="btn" data-action="clear-date">Ver todas las fechas</button></div>';
+    }
     if (!all.length) {
-      return head + '<div class="empty"><h2>Nada que resumir todavía</h2><p>Cuando crees proyectos, aquí verás el presupuesto y el margen sumados.</p>' +
+      return head + '<div class="empty"><h2>Nada que resumir todavía</h2><p>Cuando crees proyectos, aquí verás el valor y el margen sumados.</p>' +
         '<button type="button" class="btn btn-primary" data-action="new-project">' + icon('plus') + 'Nuevo proyecto</button></div>';
     }
 
     var figures = '<div class="figures">' +
-      figure('Proyectos', String(all.length), active + ' activos (en propuesta o ejecución)') +
-      figure('Presupuesto total', t.budgetKnown ? moneyShort(t.budget) : 'Por definir', t.budgetKnown ? money(t.budget) + (pending ? ' · ' + pending + ' por definir' : '') : 'Ningún proyecto tiene presupuesto') +
-      figure('Margen Fuse total', t.marginKnown ? moneyShort(t.margin) : 'Por definir', t.marginKnown ? money(t.margin) + ' · ' + pct(avgPct) + ' promedio' : 'Define presupuesto y % para calcularlo') +
+      figure('Proyectos', String(all.length), active + (active === 1 ? ' activo' : ' activos') + ' (en propuesta o ejecución)') +
+      figure('Valor total de proyectos', t.budgetKnown ? moneyShort(t.budget) : 'Por definir', t.budgetKnown ? money(t.budget) + (pending ? ' · ' + pending + ' por definir' : '') : 'Ningún proyecto tiene valor') +
+      figure('Margen Fuse total', t.marginKnown ? moneyShort(t.margin) : 'Por definir', t.marginKnown ? money(t.margin) + ' · ' + pct(avgPct) + ' promedio' : 'Define valor y % para calcularlo') +
       figure('Tareas listas', t.tasks ? t.tasksDone + ' de ' + t.tasks : '0', t.tasks ? t.tasksProgress + ' en desarrollo · ' + (t.tasks - t.tasksDone - t.tasksProgress) + ' pendientes' : 'Sin tareas creadas') +
     '</div>';
 
@@ -520,7 +657,7 @@
       return { s: s, items: items, t: totals(items) };
     });
     var dist = statusDist(all);
-    var statusTable = '<table class="data"><thead><tr><th>Estado</th><th class="num">Proyectos</th><th class="num">Presupuesto</th><th class="num">Margen Fuse</th></tr></thead><tbody>' +
+    var statusTable = '<table class="data"><thead><tr><th>Estado</th><th class="num">Proyectos</th><th class="num">Valor</th><th class="num">Margen Fuse</th></tr></thead><tbody>' +
       byStatus.map(function (g) {
         return '<tr' + (g.items.length ? '' : ' class="is-zero"') + '><td><span class="dot tone-' + g.s.tone + '"></span>' + esc(g.s.label) + '</td>' +
           '<td class="num">' + g.items.length + '</td>' +
@@ -541,16 +678,21 @@
         '<td class="num">' + (ct.marginKnown ? money(ct.margin) : '<span class="muted">Por definir</span>') + '</td>' +
         '<td class="num">' + (ct.tasks ? ct.tasksDone + '/' + ct.tasks : '<span class="muted">—</span>') + '</td></tr>';
     }).join('');
-    var clientTable = '<table class="data"><thead><tr><th>Cliente</th><th class="num">Proyectos</th><th class="num">Presupuesto</th><th class="num">Margen Fuse</th><th class="num">Tareas</th></tr></thead><tbody>' + clientRows +
+    var clientTable = '<table class="data"><thead><tr><th>Cliente</th><th class="num">Proyectos</th><th class="num">Valor</th><th class="num">Margen Fuse</th><th class="num">Tareas</th></tr></thead><tbody>' + clientRows +
       '</tbody><tfoot><tr><td>Total</td><td class="num">' + all.length + '</td><td class="num">' + (t.budgetKnown ? money(t.budget) : '—') + '</td><td class="num">' + (t.marginKnown ? money(t.margin) : '—') + '</td><td class="num">' + (t.tasks ? t.tasksDone + '/' + t.tasks : '—') + '</td></tr></tfoot></table>';
 
     /* Próximos pasos */
-    var steps = all.filter(function (p) { return p.status !== 'done'; }).sort(function (a, b) { return a.order - b.order; });
+    var steps = all.filter(function (p) { return p.status !== 'done'; }).sort(function (a, b) {
+      if (a.dueDate && b.dueDate) return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.order - b.order;
+      if (a.dueDate || b.dueDate) return a.dueDate ? -1 : 1;
+      return a.order - b.order;
+    });
     var stepList = steps.length ? '<ul class="steps">' + steps.map(function (p) {
       var s = statusById(PROJECT_STATUSES, p.status);
       return '<li><button type="button" class="step" data-action="open-project" data-id="' + p.id + '">' +
         '<span class="step-main"><span class="step-title"><span class="strong">' + esc(p.name || 'Sin nombre') + '</span><span class="muted"> · ' + esc(p.client || 'Sin cliente') + '</span></span>' +
         '<span class="step-text">' + (p.nextStep ? esc(p.nextStep) : '<span class="muted">Sin próximo paso definido</span>') + '</span></span>' +
+        '<span class="step-due ' + dueState(p.dueDate, false).cls + '">' + (p.dueDate ? icon('calendar') + '<span><span class="step-date">' + esc(fmtDay(p.dueDate)) + '</span><span class="step-rel">' + esc(dueState(p.dueDate, false).text) + '</span></span>' : '<span class="muted small">Sin fecha</span>') + '</span>' +
         '<span class="tag tone-' + s.tone + '">' + esc(s.label) + '</span>' + icon('arrowRight', 'step-arrow') +
       '</button></li>';
     }).join('') + '</ul>' : '<p class="muted">Todos los proyectos están listos.</p>';
@@ -559,7 +701,7 @@
       '<div class="ov-grid">' +
         '<section class="panel"><h2>Por estado</h2>' + dist + statusTable + '</section>' +
         '<section class="panel"><h2>Por cliente</h2>' + clientTable + '</section>' +
-        '<section class="panel panel-wide"><h2>Próximos pasos</h2>' + stepList + '</section>' +
+        '<section class="panel panel-wide"><h2>Próximos pasos y fechas</h2>' + stepList + '</section>' +
       '</div>';
   }
 
@@ -579,15 +721,20 @@
     var m = marginOf(p);
     var c = taskCounts(p);
     var s = statusById(PROJECT_STATUSES, p.status);
-    var tasks = p.tasks.filter(function (t) { return ui.taskFilter === 'all' || t.status === ui.taskFilter; });
+    var dr = dateFilterActive() ? dateRange() : null;
+    var tasks = p.tasks.filter(function (t) {
+      return (ui.taskFilter === 'all' || t.status === ui.taskFilter) && dateMatches(t.dueDate, t.status === 'done', dr);
+    });
+    var pdue = dueState(p.dueDate, p.status === 'done');
 
     var summary = [];
     summary.push('<strong>' + esc(p.name || 'Este proyecto') + '</strong>' + (p.client ? ' de <strong>' + esc(p.client) + '</strong>' : '') + ' ' + ({ not_started: 'aún <strong>no ha empezado</strong>', proposal: 'está <strong>en propuesta</strong>', running: 'está <strong>en ejecución</strong>', paused: 'está <strong>en pausa</strong>', done: 'está <strong>listo</strong>' }[p.status] || '') + '.');
     if (p.budget != null) {
-      summary.push('Presupuesto de ' + money(p.budget) + (m != null ? ', con un margen Fuse de ' + money(m) + ' (' + pct(p.marginPct) + ').' : '; el margen está por definir.'));
+      summary.push('Valor del proyecto de ' + money(p.budget) + (m != null ? ', con un margen Fuse de ' + money(m) + ' (' + pct(p.marginPct) + ').' : '; el margen está por definir.'));
     } else {
-      summary.push('El presupuesto está por definir.');
+      summary.push('El valor del proyecto está por definir.');
     }
+    if (p.dueDate) summary.push('Fecha del proyecto: ' + esc(fmtDay(p.dueDate)) + (p.status !== 'done' ? ' (' + esc(pdue.text.toLowerCase()) + ').' : '.'));
     summary.push(c.total ? c.done + ' de ' + c.total + ' tareas listas' + (c.progress ? ', ' + c.progress + ' en desarrollo' : '') + '.' : 'Aún no tiene tareas.');
 
     return '<div class="scrim" data-action="close-panel"></div>' +
@@ -603,15 +750,18 @@
           '<input id="panel-name" class="title-input" data-key="p-name" data-field="name" data-id="' + p.id + '" value="' + esc(p.name) + '" placeholder="Nombre del proyecto" aria-label="Nombre del proyecto">' +
           '<div class="meta-row">' +
             '<label class="meta"><span class="meta-label">Cliente</span><input class="field" data-key="p-client" data-field="client" data-id="' + p.id + '" value="' + esc(p.client) + '" placeholder="Ej. Friko" list="client-list"></label>' +
+            '<label class="meta"><span class="meta-label">Fecha del proyecto</span>' +
+              '<input type="date" class="field date-field ' + pdue.cls + '" data-key="p-due" data-field="dueDate" data-id="' + p.id + '" value="' + esc(p.dueDate || '') + '">' +
+            '</label>' +
             '<div class="meta"><span class="meta-label">Estado</span>' + statusPill('project', p.status, 'data-id="' + p.id + '"') + '</div>' +
           '</div>' +
 
           '<p class="summary">' + summary.join(' ') + '</p>' +
 
           '<div class="money-grid">' +
-            '<label class="money-cell"><span class="meta-label">Presupuesto</span><input class="field num" data-key="p-budget" data-field="budget" data-id="' + p.id + '" value="' + esc(money(p.budget)) + '" placeholder="Por definir" inputmode="decimal"><span class="hint">Ej. 190000000 o 190 millones</span></label>' +
+            '<label class="money-cell"><span class="meta-label">Valor del proyecto</span><input class="field num" data-key="p-budget" data-field="budget" data-id="' + p.id + '" value="' + esc(money(p.budget)) + '" placeholder="Por definir" inputmode="decimal"><span class="hint">Ej. 190000000 o 190 millones</span></label>' +
             '<label class="money-cell"><span class="meta-label">% Margen</span><input class="field num" data-key="p-pct" data-field="marginPct" data-id="' + p.id + '" value="' + esc(pct(p.marginPct)) + '" placeholder="Ej. 15%" inputmode="decimal"><span class="hint">Entre 0 y 100</span></label>' +
-            '<div class="money-cell money-result"><span class="meta-label">Margen Fuse</span><span class="result-value">' + (m == null ? 'Por definir' : money(m)) + '</span><span class="hint">' + (m == null ? 'Presupuesto × % de margen' : 'Calculado automáticamente') + '</span></div>' +
+            '<div class="money-cell money-result"><span class="meta-label">Margen Fuse</span><span class="result-value">' + (m == null ? 'Por definir' : money(m)) + '</span><span class="hint">' + (m == null ? 'Valor × % de margen' : 'Calculado automáticamente') + '</span></div>' +
           '</div>' +
 
           '<label class="block"><span class="meta-label">Próximo paso</span><textarea class="field" rows="2" data-key="p-next" data-field="nextStep" data-id="' + p.id + '" placeholder="¿Qué sigue en este proyecto?">' + esc(p.nextStep) + '</textarea></label>' +
@@ -619,14 +769,17 @@
           '<section class="tasks">' +
             '<div class="tasks-head"><h2>Tareas <span class="muted">' + c.total + '</span></h2>' + (c.total ? taskBar(p) : '') + '</div>' +
             '<form class="task-add" data-form="add-task" data-id="' + p.id + '">' + icon('plus') +
-              '<input name="title" data-key="p-newtask" placeholder="Agregar una tarea y presionar Enter" aria-label="Nueva tarea" autocomplete="off">' +
+              '<input name="title" data-key="p-newtask" placeholder="Nueva tarea…" aria-label="Nueva tarea" autocomplete="off">' +
+              '<input type="date" name="due" class="task-add-date" aria-label="Fecha de la nueva tarea (opcional)" title="Fecha de la tarea (opcional)">' +
               '<button type="submit" class="btn btn-sm">Agregar</button>' +
             '</form>' +
             (c.total ? '<div class="chips chips-sm" role="group" aria-label="Filtrar tareas">' +
               taskChip('all', 'Todas', c.total) + TASK_STATUSES.map(function (ts) { return taskChip(ts.id, ts.label, c[ts.id], ts.tone); }).join('') +
             '</div>' : '') +
+            (c.total && dr ? '<p class="date-note">' + icon('calendar') + 'Mostrando tareas con fecha: <strong>' + esc(dateFilterLabel().toLowerCase()) + '</strong>' +
+              '<button type="button" class="link-btn" data-action="clear-date">Ver todas</button></p>' : '') +
             (c.total ? (tasks.length ? '<ul class="task-list">' + tasks.map(function (t) { return taskRow(p, t); }).join('') + '</ul>'
-              : '<p class="muted small task-empty">No hay tareas con este estado.</p>')
+              : '<p class="muted small task-empty">' + (dr ? 'No hay tareas con estos filtros.' : 'No hay tareas con este estado.') + '</p>')
               : '<p class="muted small task-empty">Divide el proyecto en tareas y marca cada una como pendiente, en desarrollo o lista.</p>') +
           '</section>' +
 
@@ -646,6 +799,7 @@
     return '<li class="task' + (t.status === 'done' ? ' is-done' : '') + '">' +
       '<button type="button" class="task-check" data-action="toggle-task" data-id="' + p.id + '" data-task="' + t.id + '" aria-label="' + (t.status === 'done' ? 'Marcar como pendiente' : 'Marcar como lista') + '">' + (t.status === 'done' ? icon('check') : '') + '</button>' +
       '<input class="cell-input task-title" data-key="t-' + t.id + '" data-field="taskTitle" data-id="' + p.id + '" data-task="' + t.id + '" value="' + esc(t.title) + '" aria-label="Título de la tarea">' +
+      '<span class="task-date">' + datePick(t.dueDate, t.status === 'done', 'data-field="taskDue" data-id="' + p.id + '" data-task="' + t.id + '"', 'Fecha de la tarea', 'td-' + t.id) + '</span>' +
       statusPill('task', t.status, 'data-id="' + p.id + '" data-task="' + t.id + '"') +
       '<button type="button" class="btn btn-ghost btn-icon danger-hover" data-action="delete-task" data-id="' + p.id + '" data-task="' + t.id + '" aria-label="Borrar tarea">' + icon('trash') + '</button>' +
     '</li>';
@@ -754,7 +908,7 @@
     var v = el.value;
     if (field === 'budget') {
       var parsed = parseMoney(v);
-      if (v.trim() && parsed == null) { toast('No entendí ese presupuesto. Escribe un número, por ejemplo 190000000 o 190 millones.'); render(); return; }
+      if (v.trim() && parsed == null) { toast('No entendí ese valor. Escribe un número, por ejemplo 190000000 o 190 millones.'); render(); return; }
       if (parsed === p.budget) { el.value = money(p.budget); return; }
       p.budget = parsed;
     } else if (field === 'marginPct') {
@@ -762,6 +916,15 @@
       if (v.trim() && pc == null) { toast('El margen debe ser un número entre 0 y 100.'); render(); return; }
       if (pc === p.marginPct) { el.value = pct(p.marginPct); return; }
       p.marginPct = pc;
+    } else if (field === 'dueDate') {
+      var dv = validISO(v) ? v : null;
+      if (dv === p.dueDate) return;
+      p.dueDate = dv;
+    } else if (field === 'taskDue') {
+      var tk = p.tasks.find(function (x) { return x.id === el.dataset.task; });
+      var tv = validISO(v) ? v : null;
+      if (!tk || tk.dueDate === tv) return;
+      tk.dueDate = tv;
     } else if (field === 'taskTitle') {
       var t = p.tasks.find(function (x) { return x.id === el.dataset.task; });
       if (!t) return;
@@ -946,7 +1109,19 @@
       case 'delete-project': deleteProject(a.dataset.id); break;
       case 'status-menu': if (popAnchor === a) closeMenu(); else openStatusMenu(a); break;
       case 'filter': ui.statusFilter = a.dataset.status; saveUi(); render(); break;
-      case 'clear-filters': ui.statusFilter = 'all'; ui.query = ''; saveUi(); render(); break;
+      case 'clear-filters': ui.statusFilter = 'all'; ui.query = ''; ui.dateFilter = { preset: 'all', from: '', to: '' }; saveUi(); render(); break;
+      case 'pick-date': {
+        var nat = a.parentNode.querySelector('.date-native');
+        try { if (nat.showPicker) { nat.showPicker(); break; } } catch (err) {}
+        nat.classList.add('is-fallback'); nat.focus(); nat.click();
+        break;
+      }
+      case 'clear-field-date': {
+        var n2 = a.parentNode.querySelector('.date-native');
+        n2.value = ''; setField(n2);
+        break;
+      }
+      case 'clear-date': ui.dateFilter = { preset: 'all', from: '', to: '' }; saveUi(); render(); break;
       case 'toggle-group': ui.grouped = !ui.grouped; saveUi(); render(); break;
       case 'collapse': ui.collapsed[a.dataset.group] = !ui.collapsed[a.dataset.group]; saveUi(); render(); break;
       case 'task-filter': ui.taskFilter = a.dataset.status; render(); break;
@@ -985,6 +1160,15 @@
   appEl.addEventListener('change', function (e) {
     var el = e.target;
     if (el.dataset.field === 'sort') { ui.sort = el.value; saveUi(); render(); return; }
+    if (el.dataset.field === 'datePreset') {
+      ui.dateFilter = { preset: el.value, from: ui.dateFilter.from || '', to: ui.dateFilter.to || '' };
+      if (el.value === 'custom' && !ui.dateFilter.from && !ui.dateFilter.to) { ui.dateFilter.from = todayISO(); ui.dateFilter.to = addDays(todayISO(), 30); }
+      saveUi(); render(); return;
+    }
+    if (el.dataset.field === 'dateFrom' || el.dataset.field === 'dateTo') {
+      ui.dateFilter[el.dataset.field === 'dateFrom' ? 'from' : 'to'] = validISO(el.value) ? el.value : '';
+      saveUi(); render(); return;
+    }
     if (el.dataset.field === 'query') return;
     if (el.dataset.id && el.dataset.field) setField(el);
   });
@@ -1048,7 +1232,8 @@
     if (!title) { input.focus(); return; }
     var p = getProject(form.dataset.id);
     if (!p) return;
-    p.tasks.push(makeTask(title, 'pending'));
+    var due = form.elements.due && validISO(form.elements.due.value) ? form.elements.due.value : null;
+    p.tasks.push(makeTask(title, 'pending', due));
     touch(p);
     if (ui.taskFilter !== 'all' && ui.taskFilter !== 'pending') ui.taskFilter = 'all';
     ui.focusNext = 'p-newtask';
